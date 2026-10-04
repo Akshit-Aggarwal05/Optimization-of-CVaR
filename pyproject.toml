@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cvar-portfolio-engine"
+version = "0.1.0"
+description = "CVaR portfolio optimization via the Rockafellar-Uryasev linear programming formulation, with multi-objective optimization and non-linear stress testing."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Akshit Aggarwal" }]
+keywords = [
+    "conditional-value-at-risk",
+    "cvar",
+    "expected-shortfall",
+    "portfolio-optimization",
+    "risk-management",
+    "linear-programming",
+    "multi-objective-optimization",
+    "nsga-ii",
+    "stress-testing",
+    "quantitative-finance",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Typing :: Typed",
+]
+
+# Pinned to lower bounds only. scipy carries HiGHS, which solves every linear
+# programme here, so no commercial solver is required.
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pandas>=2.0",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/Akshit-Aggarwal05/Optimization-of-CVaR"
+Repository = "https://github.com/Akshit-Aggarwal05/Optimization-of-CVaR"
+Issues = "https://github.com/Akshit-Aggarwal05/Optimization-of-CVaR/issues"
+
+[project.scripts]
+cvar-engine = "src.cli:main"
+
+[tool.setuptools]
+# The repository uses a top-level 'src' package rather than a src-layout with a
+# differently named distribution package, so the subpackages are listed
+# explicitly. Automatic discovery would otherwise try to treat 'tests' and
+# 'docs' as packages too.
+packages = ["src", "src.data", "src.models", "src.optimization"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = [
+    # A silently invalid escape in a docstring is a real defect in a codebase
+    # this heavy with LaTeX, so it must fail the build rather than scroll past.
+    "error::SyntaxWarning",
+]

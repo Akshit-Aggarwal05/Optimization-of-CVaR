@@ -358,6 +358,14 @@ class CVaRSolution:
         Solver diagnostics propagated from :func:`scipy.optimize.linprog`.
     beta, n_scenarios, n_assets
         Problem dimensions, retained for audit trails.
+    tail_slacks
+        The solver's auxiliary variables ``u_1 ... u_q``, shape ``(q,)``.
+        Exposed so that the LP's primal feasibility can be audited directly
+        against the two constraints printed after eq. (17) - ``u_k >= 0`` and
+        ``x'y_k + alpha + u_k >= 0`` - rather than inferred from the objective
+        value.  At the optimum each ``u_k`` equals the positive part
+        ``max(f(x, y_k) - alpha, 0)`` exactly, which is what makes the
+        linearisation tight.
     """
 
     weights: FloatArray
@@ -373,6 +381,7 @@ class CVaRSolution:
     beta: float
     n_scenarios: int
     n_assets: int
+    tail_slacks: FloatArray
 
     @property
     def reported_var(self) -> float:
@@ -1628,6 +1637,7 @@ class CVaRLinearProgram:
             beta=self._beta,
             n_scenarios=self.n_scenarios,
             n_assets=n,
+            tail_slacks=z[n + 1 :],
         )
 
 

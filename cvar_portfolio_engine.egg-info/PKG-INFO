@@ -1,0 +1,763 @@
+Metadata-Version: 2.4
+Name: cvar-portfolio-engine
+Version: 0.1.0
+Summary: CVaR portfolio optimization via the Rockafellar-Uryasev linear programming formulation, with multi-objective optimization and non-linear stress testing.
+Author: Akshit Aggarwal
+Project-URL: Homepage, https://github.com/Akshit-Aggarwal05/Optimization-of-CVaR
+Project-URL: Repository, https://github.com/Akshit-Aggarwal05/Optimization-of-CVaR
+Project-URL: Issues, https://github.com/Akshit-Aggarwal05/Optimization-of-CVaR/issues
+Keywords: conditional-value-at-risk,cvar,expected-shortfall,portfolio-optimization,risk-management,linear-programming,multi-objective-optimization,nsga-ii,stress-testing,quantitative-finance
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Financial and Insurance Industry
+Classifier: Intended Audience :: Science/Research
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Topic :: Office/Business :: Financial :: Investment
+Classifier: Topic :: Scientific/Engineering :: Mathematics
+Classifier: Typing :: Typed
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.26
+Requires-Dist: scipy>=1.11
+Requires-Dist: pandas>=2.0
+Requires-Dist: matplotlib>=3.8
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4; extra == "dev"
+Requires-Dist: pytest-cov>=4.1; extra == "dev"
+
+# Advanced Portfolio Risk Engine & Tail-Risk Stress Tester
+
+**Conditional Value-at-Risk (CVaR) portfolio optimization via the Rockafellar–Uryasev linear programming formulation, extended with multi-objective optimization and non-linear stress testing.**
+
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
+[![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.26-013243.svg)](https://numpy.org/)
+[![SciPy](https://img.shields.io/badge/scipy-%E2%89%A51.11-8CAAE6.svg)](https://scipy.org/)
+[![Tests](https://github.com/Akshit-Aggarwal05/Optimization-of-CVaR/actions/workflows/tests.yml/badge.svg)](https://github.com/Akshit-Aggarwal05/Optimization-of-CVaR/actions/workflows/tests.yml)
+[![Paper regression](https://img.shields.io/badge/paper%20regression-10%2F10%20tables-brightgreen.svg)](#validation-status)
+
+---
+
+## Table of Contents
+
+- [Project Overview](#project-overview)
+- [Methodology](#methodology)
+- [Validation Status](#validation-status)
+- [Provenance & Attribution](#provenance--attribution)
+- [Repository Structure](#repository-structure)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Results & Visualization](#results--visualization)
+- [Testing](#testing)
+- [Scope & Limitations](#scope--limitations)
+- [Roadmap](#roadmap)
+- [Academic References](#academic-references)
+
+---
+
+## Project Overview
+
+### What
+
+A modular, production-oriented risk engine that allocates capital by **minimizing tail risk** rather than variance. The core optimizer minimizes **Conditional Value-at-Risk** — the expected loss *conditional on* being in the worst `(1 − β)` of outcomes, also known as Expected Shortfall, Mean Excess Loss or Tail VaR.
+
+The engine comprises three layers:
+
+| Layer | Module | Capability |
+|---|---|---|
+| **Risk measurement** | `src/models/risk_metrics.py` | Historical & parametric VaR/CVaR; the Rockafellar–Uryasev LP that minimizes CVaR and recovers VaR simultaneously |
+| **Portfolio construction** | `src/optimization/` | Multi-objective optimization over return, tail risk and hedging cost — NSGA-II and exact Tchebycheff scalarization |
+| **Stress testing** | `src/models/stress_tester.py` | Historical macro shock scenarios, Black–Scholes Greeks, and delta / delta-gamma / full revaluation for books containing options |
+
+### Why
+
+**Variance is the wrong risk measure for asymmetric payoffs.** It penalizes upside and downside equally — indefensible for a book holding options, credit, or any convex payoff.
+
+**VaR is the wrong tail measure.** It is not sub-additive (Artzner et al., 1999): the measured risk of a combined portfolio can *exceed* the sum of its parts, which is incoherent for a diversification-driven business. Worse, when estimated from scenarios VaR is non-convex in the portfolio weights and exhibits multiple local optima — so it cannot be reliably optimized at all.
+
+**CVaR fixes both.** It is a coherent risk measure (sub-additive, convex, monotonic, positively homogeneous) and — the key result this project implements — it can be minimized by **linear programming**, with VaR falling out as a by-product of the same solve.
+
+This repository is therefore an advanced progression from standard VaR modelling: it moves from *measuring* a non-coherent statistic to *optimizing* a coherent one, at a computational cost that scales to realistic instrument counts.
+
+---
+
+## Methodology
+
+### The Rockafellar–Uryasev formulation
+
+For a decision vector `x` (portfolio weights) and random vector `y` (asset returns), the loss is **linear** in the weights — equation (12) of the source paper:
+
+```
+f(x, y) = -x'y
+```
+
+Losses are positive; a profit is a negative loss. For confidence level `β ∈ (0,1)`, `β`-VaR is the `β`-quantile of the loss and `β`-CVaR is the conditional expectation beyond it.
+
+The central device is the **auxiliary function** — equation (4):
+
+```
+F_β(x, α) = α + (1 - β)^-1 * E[ max(f(x, y) - α, 0) ]
+```
+
+**Theorem 1.** `F_β` is convex and continuously differentiable in `α`; its *minimum* is CVaR and its *argmin* is a closed interval whose **left endpoint is VaR**.
+
+**Theorem 2.** Minimizing CVaR over `x ∈ X` is equivalent to jointly minimizing `F_β(x, α)` over `X × ℝ`.
+
+Three consequences drive the entire implementation:
+
+1. CVaR is computable **without first computing VaR** — which is what removes the non-convexity problem.
+2. Since the loss is linear in `x` and `X` is polyhedral, the joint problem is **convex programming** — no local optima.
+3. Under scenario sampling it reduces to a **linear program**.
+
+### Reduction to a linear program
+
+Sampling `y_1 ... y_q` gives the piecewise-linear estimator (equation 17):
+
+```
+F~_β(x, α) = α + 1/(q(1-β)) * SUM_k max(-x'y_k - α, 0)
+```
+
+Introducing auxiliary variables `u_k` to linearize the positive part yields an LP over `z = (x, α, u_1 ... u_q)`:
+
+```
+minimize    α + 1/(q(1-β)) * SUM_k u_k
+
+subject to  x'y_k + α + u_k >= 0      for k = 1 ... q     (tail linearization)
+            u_k >= 0                                      (slack non-negativity)
+            SUM_j x_j = 1,  x_j >= 0                      (eq. 11 - budget, long-only)
+            -x'm <= -R                                    (eq. 15 - expected-return floor)
+            α free                                         (VaR is negative for a profitable book)
+```
+
+Solved with `scipy.optimize.linprog` (HiGHS). Two implementation notes that matter at scale:
+
+- **Sparse constraint matrix.** The `-I_q` block is stored in CSR form. Dense, it would require ~3.2 GB at `q = 20,000`.
+- **Objective rescaling.** As the paper suggests, the equivalent objective `(1-β)α + SUM_k u_k / q` is minimized to avoid the large `1/(q(1-β))` factor when `1-β` is small; CVaR is recovered by dividing back.
+
+### Extension A — Multi-objective optimization
+
+Real mandates balance **conflicting** objectives. This engine optimizes three simultaneously:
+
+| Objective | Sense | Convexity |
+|---|---|---|
+| Expected return | maximize | linear |
+| CVaR (tail risk) | minimize | convex piecewise-linear (Theorem 2) |
+| Derivative hedging cost | minimize | convex piecewise-linear (spread + carry on turnover and gross exposure) |
+
+Because **all three are LP-representable**, each declares a `LinearEpigraph` (`f(x) <= t` in linear form). The `max` in the Tchebycheff metric then lifts into an epigraph variable and the scalarized problem becomes a single LP:
+
+```
+minimize  t + ρ * SUM_i λ_i (f_i(x) - z*_i)
+s.t.      λ_i (f_i(x) - z*_i) <= t    for all i,     x ∈ X
+```
+
+Two solvers are provided for **comparative analysis**:
+
+- **Approach A — NSGA-II** (`src/optimization/multiobjective.py`). Fast non-dominated sorting, crowding distance, elitist `(μ+λ)` survival, and Deb's constrained-domination rule. Genetic operators are specialized for the budget simplex: exact Euclidean projection onto `{x : l <= x <= u, SUM x = b}`, plus natively feasible alternatives (affine blend crossover, budget-preserving weight-transfer mutation). Makes **no convexity assumption**, so it survives market impact, cardinality limits and minimum lot sizes.
+- **Approach B — Tchebycheff scalarization**, swept over a Das–Dennis simplex lattice. Each point is a **global** optimum delivered by HiGHS, giving an *exact reference front* — not a second heuristic.
+
+Approach B is therefore ground truth, and Approach A is scored against it via hypervolume, IGD, GD, Zitzler coverage and Schott spacing. A `TchebycheffNonlinearSolver` (SLSQP, multi-start) covers objectives with no LP form, such as variance.
+
+### Extension B — Non-linear stress testing
+
+Scenario-based CVaR only contains the tail events that happened to be sampled. Stress testing asks what the book loses in a *named* crisis.
+
+Five calibrated historical scenarios are expressed in **macro risk factors** (equity return, rate shift, credit spread, relative implied vol, liquidity multiplier) rather than instrument returns, so one scenario applies to any book: `gfc_2008`, `covid_2020`, `black_monday_1987`, `euro_crisis_2011`, `inflation_shock_2022`.
+
+Each scenario is revalued **three ways**, because the difference between them is the deliverable:
+
+| Method | Terms | Validity |
+|---|---|---|
+| `DELTA` | `SUM delta_i * dS_i + rho_i * dr` | exact only for linear books |
+| `DELTA_GAMMA` | adds `0.5 * gamma_i * dS_i^2`, `0.5 * rate_gamma_i * dr^2`, `vega_i * dsigma_i` | good to a few % for moderate shocks |
+| `FULL` | reprice every instrument | exact at any shock size — the reference |
+
+Analytic Black–Scholes–Merton Greeks (delta, gamma, vega, theta, rho) are supplied for European options; bonds carry duration and convexity, which is gamma in yield space. **Key finding:** on an option book, delta-gamma beats delta-only up to roughly a 5% move and then degrades — every historical crisis scenario sits far beyond that crossover, which is the quantitative argument for full revaluation.
+
+---
+
+## Validation Status
+
+Every published figure from the source paper's Section 3 experiment is reproduced to within its publication precision.
+
+| Target | Paper | This implementation | Deviation |
+|---|---|---|---|
+| **Table 3** — min-variance portfolio | `[0.452013, 0.115573, 0.432414]` | `[0.452011, 0.115573, 0.432415]` | `1.7e-06` |
+| **Table 3** — portfolio variance | `0.00378529` | `0.00378529` | `1.2e-09` |
+| **Table 4** — VaR at `β` = 0.95 | `0.090200` | `0.090199` | `9.3e-07` |
+| **Table 4** — CVaR at `β` = 0.95 | `0.115908` | `0.115908` | `2.9e-07` |
+| **Table 6** — Sobol LP, `q >= 10,000` | "< 1% deviation" | max `0.26%` | claim holds |
+| **Table 5** — pseudo-random MC | "slow at best" | sd 1.0–1.3% at `q` = 20,000 (20 seeds) | claim holds |
+
+The validation design exploits the paper's own **Proposition**: under normality with `β >= 0.5` and an active return constraint, the minimum-CVaR, minimum-VaR and minimum-variance portfolios coincide. The Markowitz QP therefore provides an *exact analytic benchmark*, independent of the LP being tested.
+
+Theorems 1 and 2 are additionally verified numerically — the LP optimal value equals a brute-force `min_α F~_β` and an independent order-statistic estimate to **better than 1e-12**, with `α*` coinciding with the left endpoint of the argmin at every `β`.
+
+---
+
+## Provenance & Attribution
+
+This repository is **not** a pure reproduction of a single paper. Rockafellar & Uryasev (2000) supplies the baseline risk engine; the multi-objective and stress-testing layers draw on separate literatures, and some components are original to this project. The boundaries are set out below so that nothing here is mistaken for a result it is not.
+
+### Derived from Rockafellar & Uryasev (2000)
+
+The reference paper, reproduced and validated:
+
+| Component | Source |
+|---|---|
+| Loss function `f(x,y) = -x'y` | eq. (12) |
+| Auxiliary function `F_β(x,α)` | eq. (4), eq. (13) |
+| Scenario approximation `F~_β` | eq. (9), eq. (17) |
+| LP reduction: `u_k >= 0`, `x'y_k + α + u_k >= 0` | text following eq. (17) |
+| Budget and no-short-selling constraints | eq. (11) |
+| Expected-return floor | eq. (15) |
+| Parametric VaR/CVaR coefficients `c₁(β)`, `c₂(β)` | eqs. (18)–(19) |
+| CVaR = `min_α F_β`; VaR = left endpoint of the argmin | Theorem 1 |
+| Equivalence of the joint and CVaR minimisations | Theorem 2 |
+| Equivalence of (P1), (P2), (P3) under normality | Proposition, Section 3 |
+| Mean returns, covariance matrix | Tables 1–2, verbatim |
+| Minimum-variance benchmark and its VaR/CVaR | Tables 3–4, verbatim |
+| Pseudo-random vs quasi-random convergence claims | Tables 5–6 |
+| NIKKEI book: instruments, strikes, maturities, positions, marks | Table 7, verbatim |
+| Hedging loss form `f(x,y) = x'(m - y)` | eq. (23) |
+| "The normal distribution fits the data poorly" | Figure 1, qualitative claim only |
+
+### Derived from other published work
+
+These are **not** in the reference paper. Each is cited in full under [Academic References](#academic-references):
+
+| Component | Source |
+|---|---|
+| Exact discrete-atom CVaR, `CVaR = λ·VaR + (1-λ)·CVaR⁺` | **Rockafellar & Uryasev (2002)** — a *different* paper. The 2000 paper assumes no probability atoms, which fails for a finite scenario set, so the later formulation is used |
+| Coherence axioms motivating CVaR over VaR | Artzner, Delbaen, Eber & Heath (1999) |
+| Minimum-variance benchmark problem (P3) | Markowitz (1952) |
+| NSGA-II: fast non-dominated sorting, crowding distance, constrained domination | Deb, Pratap, Agarwal & Meyarivan (2002) |
+| Simulated binary crossover (SBX), polynomial mutation | Deb & Agrawal (1995) |
+| Simplex-lattice weight design | Das & Dennis (1998) |
+| Augmented Tchebycheff scalarisation | Miettinen (1999) |
+| Hypervolume and coverage indicators | Zitzler & Thiele (1999) |
+| Option pricing and Greeks | Black & Scholes (1973); Merton (1973) |
+| Source of the NIKKEI hedging problem | Mausser & Rosen (1999) |
+
+### Original to this project
+
+No published source. These are design decisions and modelling choices made here:
+
+- **The entire multi-objective layer's problem formulation.** The reference paper contains no multi-objective optimisation. The return / CVaR / hedging-cost triple, the `HedgingCostModel` (proportional spread on turnover plus carry on gross exposure), and the `LinearEpigraph` protocol that makes the Tchebycheff programme exactly solvable are all original.
+- **The entire stress-testing layer.** The paper contains no stress testing. The risk-factor taxonomy, the five historical scenarios and every shock magnitude in them, all factor betas (`SPX` 1.00, `GOVT` −10.0, `SMALL` 1.35, and the rest), and the bond duration/convexity figures are constructed, not estimated from data or taken from a source.
+- **The three-way revaluation comparison** (delta / delta-gamma / full) and the Taylor convergence-order tests are standard practice, not a result from this paper.
+- **Four assumptions underpinning the NIKKEI reconstruction**, none of them published: the contract multiplier of 1,000 (*inferred* from Table 7's internal consistency), the JPY risk-free rate of 0.005, the Mitsubishi/Komatsu correlation of 0.50, and the Student-t(4) return driver. The implied-volatility inversion is also a reconstruction technique, not the paper's method.
+- **Packaging, CLI, CI and figure generation.**
+
+### Summary
+
+> The baseline risk engine is a faithful implementation of Rockafellar & Uryasev (2000), validated against its published tables. The multi-objective and stress-testing layers are original extensions built on separate literatures, and the NIKKEI loss distribution is a reconstruction, not a reproduction.
+
+That is the strongest claim this repository supports. Anything broader — "all components follow the reference paper", "reproduces Figure 1", "reproduces the Section 4 results" — is not accurate.
+
+---
+
+## Repository Structure
+
+```
+Optimization-of-CVaR/
+│
+├── .github/
+│   └── workflows/
+│       └── tests.yml                # CI: suite, paper regression, figure build
+│
+├── src/
+│   ├── data/
+│   │   ├── __init__.py
+│   │   ├── paper_datasets.py        # Tables 1-4 verbatim + Sobol/pseudo-random generator
+│   │   └── nikkei_portfolio.py      # Table 7 book, implied-vol calibration, scenarios
+│   │
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── risk_metrics.py          # VaR/CVaR + Rockafellar-Uryasev LP        (1,711 lines)
+│   │   └── stress_tester.py         # Shock scenarios, BSM Greeks, revaluation (1,746 lines)
+│   │
+│   ├── optimization/
+│   │   ├── __init__.py
+│   │   ├── objectives.py            # Objective ABC + LP-epigraph protocol       (772 lines)
+│   │   └── multiobjective.py        # NSGA-II, Tchebycheff LP, Pareto machinery (2,529 lines)
+│   │
+│   ├── __init__.py
+│   ├── cli.py                       # cvar-engine console script
+│   └── visualization.py             # figure generation into docs/images/
+│
+├── tests/
+│   ├── __init__.py
+│   ├── test_risk_metrics.py         # 61 tests - paper regression + theorem verification
+│   ├── test_multiobjective.py       # 65 tests - operators, indicators, cross-validation
+│   ├── test_stress_tester.py        # 52 tests - Greeks vs finite differences, convergence
+│   ├── test_lp_feasibility.py       # 24 tests - LP constraints + published-table gates
+│   └── test_nikkei_portfolio.py     # 23 tests - Table 7 exactness, reconstruction limits
+│
+├── docs/
+│   └── images/                      # generated figures (see Results & Visualization)
+│
+├── conftest.py                      # puts the repository root on sys.path for pytest
+├── pyproject.toml                   # packaging, console script, pytest config
+├── requirements.txt
+├── rtr179-CVaR1.pdf                 # source paper
+└── README.md
+```
+
+> **Note.** `notebooks/` and a top-level `data/` directory are not present in the current tree — market data is generated analytically from the paper's published parameters rather than loaded from disk. `notebooks/` is tracked in the [Roadmap](#roadmap).
+
+---
+
+## Installation
+
+Requires **Python 3.12+**.
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/Akshit-Aggarwal05/Optimization-of-CVaR.git
+cd Optimization-of-CVaR
+
+# 2. Create and activate a virtual environment
+python -m venv .venv
+
+#    Windows (PowerShell)
+.\.venv\Scripts\Activate.ps1
+#    macOS / Linux
+source .venv/bin/activate
+
+# 3. Install the package (editable, with test extras)
+pip install --upgrade pip
+pip install -e ".[dev]"
+
+# 4. Verify the installation
+pytest tests/
+cvar-engine validate
+```
+
+Expected output:
+
+```
+225 passed in 160.82s
+
+All 10 checks passed.
+```
+
+Installing the package puts the `cvar-engine` console script on your path and
+makes `src` importable from anywhere. `pip install -r requirements.txt` still
+works if you prefer not to install the package, but then commands must be run
+from the repository root.
+
+### Dependencies
+
+| Package | Minimum | Role |
+|---|---|---|
+| `numpy` | 1.26 | Vectorized numerics throughout |
+| `scipy` | 1.11 | `optimize.linprog` (HiGHS) for every LP; `sparse` for the scenario block; `stats.qmc` for Sobol sequences; `stats.norm` for Black–Scholes |
+| `pandas` | 2.0 | Optional — imported lazily by the `.to_frame()` report helpers only |
+| `matplotlib` | 3.8 | Figure generation (see [Results](#results--visualization)) |
+| `pytest` | 7.4 | Test suite |
+
+> **No commercial solver is required.** The linear programs are solved by HiGHS, which ships with SciPy. The source paper used CPLEX; results agree to solver tolerance.
+
+---
+
+## Quick Start
+
+### Command line
+
+The CLI deliberately does **not** take arbitrary live tickers. The engine exists to reproduce and extend Rockafellar & Uryasev (2000), so it exposes the paper's own experiments as named commands.
+
+#### Section 3 — the three-instrument portfolio
+
+S&P 500, long-term US government bonds and small-cap stocks, optimized by the Rockafellar–Uryasev LP and compared against the published tables:
+
+```bash
+cvar-engine paper-portfolio --beta 0.95 --scenarios 16384
+```
+
+```
+OPTIMAL PORTFOLIO
+  S&P 500         0.451293
+  Gov Bond        0.115849
+  Small Cap       0.432857
+  sum             1.000000
+
+  beta-VaR        0.090257
+  beta-CVaR       0.115941
+  E[return]       0.011000
+
+Table 4 - VaR/CVaR of the benchmark, eqs. (18)-(19)
+                       paper    analytic          LP   LP dev %
+  VaR               0.090200    0.090199    0.090257       0.06
+  CVaR              0.115908    0.115908    0.115941       0.03
+```
+
+Options: `--beta`, `--scenarios`, `--engine {sobol,pseudo}`, `--target-return`, `--seed`, `--no-compare`, `--json`.
+
+#### Section 4 — the NIKKEI option book
+
+The eleven-instrument Table 7 book, with the best normal approximation fitted to its one-day loss distribution as in Figure 1:
+
+```bash
+cvar-engine nikkei --scenarios 1000 --plot
+```
+
+```
+BASE VALUATION
+  reconstructed :      12,493,368.00  (1,000 JPY)
+  Table 7 sum   :      12,493,368.00
+  residual      :          5.066e-07
+
+BEST NORMAL APPROXIMATION (Figure 1)
+  fitted N(mu, sigma) : mu = 16,458, sigma = 174,843
+                         empirical      normal fit   error %
+  VaR                      282,321         304,050       7.7
+  CVaR                     370,661         377,110       1.7
+
+  Jarque-Bera statistic 87.1, p = 1.223e-19
+  Normality: REJECTED - the normal distribution fits the data poorly, as the paper reports
+```
+
+Options: `--scenarios`, `--beta`, `--distribution {student_t,normal}`, `--dof`, `--vol-shock-sd`, `--correlation`, `--rate`, `--plot`, `--json`.
+
+> **Read [Scope & Limitations](#scope--limitations) before quoting these numbers.** The portfolio and its marks are the paper's; the scenarios are a reconstruction, because the originals are unpublished.
+
+#### Paper regression and figures
+
+```bash
+cvar-engine validate                       # exits non-zero if any table is missed
+cvar-engine figures --only nikkei-losses   # regenerate one figure
+```
+
+### Python API
+
+### 1. Minimize CVaR (the baseline engine)
+
+```python
+import numpy as np
+from src.data.paper_datasets import MEAN_RETURNS, sample_normal_returns
+from src.models.risk_metrics import CVaRLinearProgram, PortfolioConstraints
+
+# Scenario set: 16,384 quasi-random draws from N(m, V)
+returns = sample_normal_returns(n_scenarios=16_384, engine="sobol", seed=20_000)
+
+# Feasible set X: eq. (11) budget + long-only, eq. (15) return floor
+constraints = PortfolioConstraints(
+    budget=1.0,                   # sum(x) == 1
+    lower_bounds=0.0,             # no short selling
+    min_expected_return=0.011,    # R in eq. (15)
+)
+
+solution = CVaRLinearProgram.from_returns(
+    returns, beta=0.95, constraints=constraints, expected_returns=MEAN_RETURNS
+).solve()
+
+print(solution)
+```
+
+```
+CVaRSolution(beta=0.9500, success=True)
+  weights = [0.454181 0.114739 0.43108 ]
+  VaR     = 0.090338
+  CVaR    = 0.115896
+  E[R]    = 0.011000
+  solver  = Optimization terminated successfully. (HiGHS Status 7: Optimal)
+```
+
+`solution.reported_var` always returns the **left endpoint** of the argmin interval per equation (7), and `solution.empirical` carries an independent order-statistic re-estimate as a built-in cross-check.
+
+### 2. Trace a three-objective Pareto front
+
+```python
+from src.optimization import (
+    CVaRObjective, ExpectedReturnObjective, HedgingCostModel, HedgingCostObjective,
+    NSGAII, NSGAIIConfig, ObjectiveSet, TchebycheffLPSolver, compare_fronts,
+)
+
+objectives = ObjectiveSet([
+    ExpectedReturnObjective(MEAN_RETURNS),
+    CVaRObjective.from_returns(returns, beta=0.95),
+    HedgingCostObjective(HedgingCostModel(
+        n_assets=3,
+        baseline_weights=np.array([1.0, 0.0, 0.0]),   # book currently all in sleeve 1
+        spreads=[0.0010, 0.0005, 0.0040],             # execution cost on turnover
+        carry=[0.0, 0.0, 0.0020],                     # theta bleed / financing
+    )),
+])
+
+box = PortfolioConstraints(budget=1.0, lower_bounds=0.0, upper_bounds=1.0)
+
+# Approach B: exact front by linear programming (ground truth)
+exact = TchebycheffLPSolver(objectives, box).solve_front(n_partitions=8)
+
+# Approach A: genetic algorithm
+evolved = NSGAII(
+    objectives, box, NSGAIIConfig(population_size=60, n_generations=40, seed=42)
+).run()
+
+print(exact)
+metrics = compare_fronts(evolved, exact)
+print(f"hypervolume ratio : {metrics['hypervolume_ratio']:.4f}")
+print(f"IGD               : {metrics['igd']:.4f}")
+print(f"coverage GA>LP    : {metrics['coverage_candidate_over_reference']:.4f}")
+```
+
+```
+ParetoFront(Tchebycheff-LP, 45 portfolios)
+  expected_return    [0.004929, 0.013706]
+  cvar_0.95          [0.040187, 0.166620]
+  hedging_cost       [0.000000, 0.007000]
+hypervolume ratio : 0.9816
+IGD               : 0.0566
+coverage GA>LP    : 0.0000
+```
+
+`coverage GA>LP == 0.0000` is a **theorem-backed invariant**: the Tchebycheff points are global optima, so nothing can dominate them. A non-zero value would indicate a constraint violation or an objective mismatch between the two routes.
+
+### 3. Stress test a book containing options
+
+```python
+from src.models.stress_tester import (
+    BondInstrument, EquityInstrument, EuropeanOption, MarketState, OptionType,
+    StressPortfolio, StressTester, default_underlyings,
+)
+
+market = MarketState(
+    spots={"SPX": 4500.0, "GOVT": 100.0, "SMALL": 2000.0},
+    volatilities={"SPX": 0.18, "GOVT": 0.06, "SMALL": 0.24},
+    rate=0.04,
+    dividend_yields={"SPX": 0.015, "SMALL": 0.010},
+)
+
+book = StressPortfolio(
+    instruments=[
+        EquityInstrument("S&P sleeve", "SPX"),
+        BondInstrument("Long govt", "GOVT", duration=10.0, convexity=140.0, base_rate=0.04),
+        EquityInstrument("Small cap", "SMALL"),
+        EuropeanOption("SPX 90% put", "SPX", 4050.0, 1.0, OptionType.PUT),   # tail hedge
+    ],
+    units=np.array([10_000.0, 300_000.0, 12_500.0, 6_000.0]),
+)
+
+tester = StressTester(book, market, default_underlyings(bond_duration_in_instrument=True))
+
+for result in tester.run_all():
+    print(result)
+```
+
+```
+black_monday_1987:    P&L  -7,193,216  (-7.15%)  | delta-only -12,912,210 (err -79.5%) | delta-gamma  -7,923,557 (err -10.2%)
+covid_2020:           P&L -15,458,179 (-15.36%)  | delta-only -23,187,647 (err -50.0%) | delta-gamma -15,306,301 (err  +1.0%)
+euro_crisis_2011:     P&L  -6,230,396  (-6.19%)  | delta-only  -9,519,434 (err -52.8%) | delta-gamma  -6,462,833 (err  -3.7%)
+gfc_2008:             P&L -25,540,280 (-25.38%)  | delta-only -32,029,556 (err -25.4%) | delta-gamma -24,887,318 (err  +2.6%)
+inflation_shock_2022: P&L -24,647,552 (-24.50%)  | delta-only -28,691,292 (err -16.4%) | delta-gamma -24,425,100 (err  +0.9%)
+```
+
+A delta-only report **overstates the 2008 loss by 25%** on this long-gamma book — the protective put's convexity is invisible to a first-order sensitivity. `tester.worst_case()` returns the single worst scenario, and `tester.to_frame()` tabulates the full set.
+
+### 4. Stressed tail risk — closing the loop
+
+```python
+from src.models.stress_tester import stressed_risk_estimate, get_scenario
+
+base, stressed = stressed_risk_estimate(
+    weights=solution.weights,
+    returns=returns,
+    scenario=get_scenario("gfc_2008"),
+    underlyings=list(default_underlyings().values()),
+    beta=0.95,
+)
+print(f"CVaR  base {base.cvar:.4f}  ->  stressed {stressed.cvar:.4f}"
+      f"  ({stressed.cvar / base.cvar:.1f}x)")
+```
+
+Optimized weights are re-scored by the risk-measurement layer on a shifted-and-widened distribution, so a stress scenario re-enters the risk measurement rather than living in a separate report.
+
+---
+
+## Results & Visualization
+
+All figures are generated by [`src/visualization.py`](src/visualization.py). Regenerate the whole set with `python -m src.visualization`, or one at a time with `cvar-engine figures --only <name>`.
+
+### Distribution of Losses, NIKKEI Portfolio — reconstruction of Figure 1
+
+![NIKKEI Loss Distribution](docs/images/nikkei_loss_distribution.png)
+
+The paper's Figure 1 motivates its Section 4: this book's loss distribution is one "the normal distribution fits poorly", which is why Minimum CVaR and Minimum Variance can disagree for it. The reconstruction reproduces that finding statistically — Jarque-Bera rejects normality at **p = 1.2e-19**, with visible excess kurtosis against the fitted Gaussian.
+
+**This is a reconstruction, not a reproduction.** The eleven instruments, strikes, maturities, positions and marks are Table 7 verbatim, and the implied volatilities are inverted from those marks so the base book reprices to the published total to 5e-7. The 1,000 scenarios behind the original figure belonged to Algorithmics and are not published, so they are simulated here. Magnitudes therefore differ from the paper's — see [Scope & Limitations](#scope--limitations).
+
+```bash
+cvar-engine nikkei --scenarios 1000 --plot
+```
+
+### Mean-CVaR Efficient Frontier
+
+Because the problem is convex, every point on this frontier is a **global** optimum.
+
+![Mean-CVaR Efficient Frontier](docs/images/efficient_frontier.png)
+
+Regenerate with:
+
+```python
+import matplotlib.pyplot as plt
+import numpy as np
+from src.data.paper_datasets import MEAN_RETURNS, sample_normal_returns
+from src.models.risk_metrics import PortfolioConstraints, cvar_efficient_frontier
+
+returns = sample_normal_returns(8_192, engine="sobol", seed=20_000)
+frontier = cvar_efficient_frontier(
+    returns, beta=0.95, target_returns=np.linspace(0.0055, 0.0135, 25),
+    constraints=PortfolioConstraints(budget=1.0, lower_bounds=0.0),
+    expected_returns=MEAN_RETURNS,
+)
+plt.plot([p.cvar for p in frontier], [p.expected_return for p in frontier], "o-")
+plt.xlabel("CVaR 0.95")
+plt.ylabel("Expected return")
+plt.title("Mean-CVaR Efficient Frontier")
+plt.savefig("docs/images/efficient_frontier.png", dpi=150, bbox_inches="tight")
+```
+
+### Three-Objective Pareto Front
+
+![Pareto Front](docs/images/pareto_front.png)
+
+The exact Tchebycheff-LP front (red) against NSGA-II (blue). Every red point is a *global* optimum, so the genetic algorithm's points can lie on the surface or behind it, never in front of it.
+
+### Portfolio Weight Distribution Along the Frontier
+
+![Weight Distribution](docs/images/weight_distribution.png)
+
+How capital rotates out of government bonds and into small caps as the return target rises — the allocation story behind the frontier curve.
+
+### NSGA-II Convergence
+
+![Convergence](docs/images/nsga2_convergence.png)
+
+Normalised hypervolume by generation. The two-objective run climbs and settles; the three-objective run plateaus early and then wanders — the crowding-distance limitation that motivates keeping an exact reference front.
+
+### Stress Test P&L Attribution
+
+![Stress Attribution](docs/images/stress_attribution.png)
+
+P&L by revaluation method across every historical scenario. **The gap between the bars is the linearisation error** — a delta-only risk report on a book with options is wrong by the visible amount, and the error grows with the square of the shock.
+
+---
+
+## Testing
+
+```bash
+pytest tests/                       # full suite
+pytest tests/test_lp_feasibility.py # LP constraints + published-table gates
+cvar-engine validate                # paper regression, non-zero exit on failure
+```
+
+| Suite | Tests | Coverage focus |
+|---|---|---|
+| `test_risk_metrics.py` | 61 | Tables 3/4/6 regression; Theorems 1 and 2 verified numerically; CVaR coherence properties (sub-additivity, translation equivariance, positive homogeneity) |
+| `test_multiobjective.py` | 65 | Simplex projection vs an independent QP solve; hand-computed hypervolume; epigraph tightness; genetic-operator invariants; cross-validation against the Step 1 frontier |
+| `test_stress_tester.py` | 52 | Every Greek vs a finite difference of its own pricer; put-call parity; **Taylor convergence orders** — `O(h^2)` for delta and `O(h^3)` for delta-gamma |
+| `test_lp_feasibility.py` | 24 | The paper's two LP constraints asserted on the **solver's own output** — `u_k >= 0` and `x'y_k + alpha + u_k >= 0` for every scenario — plus published-table gates that fail on numerical regression |
+| `test_nikkei_portfolio.py` | 23 | Table 7 reproduced exactly; implied-vol inversion; no-arbitrage bands; the reconstruction's qualitative properties only |
+| **Total** | **225** | |
+
+The suites are written to be read as documentation: each test states the property it checks and why that property matters.
+
+### What CI enforces
+
+[`.github/workflows/tests.yml`](.github/workflows/tests.yml) runs three jobs on every push and pull request:
+
+1. **`test`** — the full suite on Python 3.12 and 3.13 (Linux) plus 3.12 on Windows.
+2. **`paper-regression`** — `cvar-engine validate`, which exits non-zero if any published figure from the source paper is missed. A numerical regression fails the build rather than being discovered later by a reader.
+3. **`figures`** — regenerates every figure into a scratch directory and uploads them as an artifact, so a plotting change cannot silently break the README.
+
+The tests badge at the top of this file reports that workflow's real state.
+
+---
+
+## Scope & Limitations
+
+Stated explicitly, because a risk engine whose assumptions are unclear is a liability.
+
+- **Single-period and static.** No rebalancing, turnover constraints or multi-period dynamics. The source paper is likewise single-period.
+- **No backtest.** There is no out-of-sample test, train/test split or walk-forward analysis — the paper contains none either, since its central claims are theorems rather than empirical findings. Reported figures are **in-sample** on the scenario set supplied.
+- **No live market data.** Scenarios are generated from the paper's published mean vector and covariance matrix. There is no ticker download, no return-estimation pipeline and no risk-free-rate curve.
+- **Section 4 is reconstructed, not reproduced.** The Table 7 book is exact — instruments, strikes, maturities, positions and marks — and the implied volatilities inverted from those marks reprice it to the published total within 5e-7. But the 1,000 Monte Carlo scenarios behind Figure 1 belonged to Algorithmics and are not in the paper, nor are the volatilities, the JPY rate, the correlation, or the contract multiplier. The reconstruction therefore reproduces the paper's *qualitative* finding (normality rejected at p = 1.2e-19) but **not** its magnitudes: VaR ≈ 282,000 against the published 657,816, and a CVaR/VaR ratio near 1.3 against the paper's 3.1. Tuning the free parameters until those two scalars matched would be curve-fitting with no independent support, so it is deliberately not done.
+- **This book's tail risk is governed by vega, not delta.** Turning on `--vol-shock-sd 0.35` moves reconstructed VaR to roughly 3,200,000 — five times the paper's figure — from the same spot model. Any single VaR number for an option book of this shape is only as good as its volatility model, which is why the parameter is exposed rather than buried.
+- **Tables 8 and 9 (the hedging results) are not reproduced.** The paper solved those by nonsmooth subgradient optimisation, which is not implemented; see the [Roadmap](#roadmap).
+- **Stress scenario magnitudes are illustrative and unverified.** The shock sizes in `HISTORICAL_SCENARIOS` are approximate figures for the stated windows, written to be internally consistent and economically sensible. They have **not** been reconciled against a market data source, and individual values may not match the published history for the window they are labelled with. They are adequate for exercising the engine and for development; they are **not** a calibration. Re-derive every factor from your own data before quoting a number from them or using them in production.
+- **Crowding distance weakens beyond two objectives.** NSGA-II recovers ~98% of the exact hypervolume at two objectives but plateaus near 90–97% at three — a documented limitation of the crowding operator, and the motivation for keeping the exact reference front.
+- **Equal-probability scenarios only.** Importance-sampled or regime-weighted scenario sets raise `NotImplementedError` rather than silently mis-weighting the tail.
+
+---
+
+## Roadmap
+
+- [x] `pyproject.toml` for `pip install -e .` with a `cvar-engine` console entry point
+- [x] CLI exposing the paper's own experiments (`paper-portfolio`, `nikkei`, `validate`, `figures`)
+- [x] GitHub Actions CI running the suite, the paper regression and the figure build
+- [x] Table 7 NIKKEI book reconstructed, with implied volatilities inverted from the published marks
+- [x] Figure 1 reconstruction, with the normality test the paper's claim implies
+- [ ] **Tables 8 and 9** — the one- and four-instrument CVaR hedges. Needs the nonsmooth subgradient solver below, or the equivalent LP over the eq. (23) loss matrix
+- [ ] Nonsmooth subgradient solver (Uryasev, 1991), the method the paper actually used in Section 4
+- [ ] `notebooks/` with annotated walkthroughs of each of the three layers
+- [ ] NSGA-III / MOEA/D reference-direction survival to improve three-objective spread
+- [ ] CVaR-constrained variants, and relaxation of the joint-density assumption
+
+---
+
+## Academic References
+
+**Primary source — the formulation this engine implements and is validated against:**
+
+> Rockafellar, R. T. and Uryasev, S. (2000). **Optimization of Conditional Value-at-Risk.** *Journal of Risk*, 2(3), 21–41.
+
+Included in this repository as [`rtr179-CVaR1.pdf`](rtr179-CVaR1.pdf). Equations (4), (11), (12), (15) and (17), Theorems 1 and 2, and the Proposition of Section 3 are referenced directly in the source comments.
+
+> **Which parts of this repository come from which source is set out in [Provenance & Attribution](#provenance--attribution).** The works below contribute components the reference paper does not contain — the multi-objective layer, the stress-testing layer, and the discrete-atom CVaR estimator all rest on them rather than on the 2000 paper.
+
+**Supporting literature:**
+
+> Rockafellar, R. T. and Uryasev, S. (2002). **Conditional Value-at-Risk for General Loss Distributions.** *Journal of Banking & Finance*, 26(7), 1443–1471.
+>
+> Source of the exact discrete-atom CVaR decomposition `CVaR = λ·VaR + (1-λ)·CVaR⁺` used by the historical estimator. The 2000 paper assumes no probability atoms, which does not hold for a finite scenario set.
+
+> Artzner, P., Delbaen, F., Eber, J.-M. and Heath, D. (1999). **Coherent Measures of Risk.** *Mathematical Finance*, 9(3), 203–228.
+>
+> The axioms motivating CVaR over VaR.
+
+> Markowitz, H. M. (1952). **Portfolio Selection.** *Journal of Finance*, 7(1), 77–91.
+>
+> The minimum-variance benchmark, problem (P3).
+
+> Mausser, H. and Rosen, D. (1999). **Beyond VaR: From Measuring Risk to Managing Risk.** *ALGO Research Quarterly*, 1(2), 5–20.
+>
+> Source of the NIKKEI hedging problem in the paper's Section 4.
+
+> Deb, K., Pratap, A., Agarwal, S. and Meyarivan, T. (2002). **A Fast and Elitist Multiobjective Genetic Algorithm: NSGA-II.** *IEEE Transactions on Evolutionary Computation*, 6(2), 182–197.
+
+> Deb, K. and Agrawal, R. B. (1995). **Simulated Binary Crossover for Continuous Search Space.** *Complex Systems*, 9(2), 115–148.
+
+> Das, I. and Dennis, J. E. (1998). **Normal-Boundary Intersection.** *SIAM Journal on Optimization*, 8(3), 631–657.
+>
+> The simplex-lattice weight design used to sweep the Tchebycheff front.
+
+> Miettinen, K. (1999). **Nonlinear Multiobjective Optimization.** Kluwer Academic Publishers.
+>
+> Augmented Tchebycheff scalarization theory.
+
+> Zitzler, E. and Thiele, L. (1999). **Multiobjective Evolutionary Algorithms: A Comparative Case Study and the Strength Pareto Approach.** *IEEE Transactions on Evolutionary Computation*, 3(4), 257–271.
+>
+> Hypervolume and coverage indicators.
+
+> Black, F. and Scholes, M. (1973). **The Pricing of Options and Corporate Liabilities.** *Journal of Political Economy*, 81(3), 637–654.
+
+> Merton, R. C. (1973). **Theory of Rational Option Pricing.** *Bell Journal of Economics and Management Science*, 4(1), 141–183.
+>
+> Continuous dividend yield in the pricer.
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome. Please ensure `python -m pytest tests/ -q` passes, and that new numerical code ships with a test asserting the mathematical property it is supposed to satisfy rather than a golden-value snapshot.

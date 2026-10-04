@@ -1,0 +1,2 @@
+[console_scripts]
+cvar-engine = src.cli:main
